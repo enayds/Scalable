@@ -4,3 +4,4 @@ beautifulsoup4>=4.12.3
 rapidfuzz>=3.6.1
 pandas>=2.2.2
 numpy>=1.26.4
+lxml>=5.2.1
