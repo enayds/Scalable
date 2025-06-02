@@ -113,6 +113,7 @@ def get_pay_band(url):
 
 # --- Helper: Band filter ---
 def apply_band_filter(df, band_from, band_to):
+    st.info("Fetching job details (band + job type)... ⏳")
     def extract_number(text):
         match = re.search(r'(\d+)', text)
         return int(match.group(1)) if match else None
