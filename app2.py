@@ -94,9 +94,27 @@ def parse_salary_fields(df):
     return df
 
 # --- Helper: Parse date ---
+import pandas as pd
+from datetime import datetime
+
 def clean_dates(df):
     df['Post Date'] = pd.to_datetime(df['Post Date'], errors='coerce')
-    df['Days Since Posted'] = (pd.to_datetime('today') - df['Post Date']).dt.days
+    now = pd.to_datetime('now')
+
+    def format_time_diff(post_date):
+        if pd.isna(post_date):
+            return "Unknown"
+        delta = now - post_date
+        total_seconds = int(delta.total_seconds())
+        days = total_seconds // 86400
+        hours = (total_seconds % 86400) // 3600
+
+        if days > 0:
+            return f"{days} day{'s' if days != 1 else ''} {hours} hour{'s' if hours != 1 else ''} ago"
+        else:
+            return f"{hours} hour{'s' if hours != 1 else ''} ago"
+
+    df['Time Since Posted'] = df['Post Date'].apply(format_time_diff)
     return df
 
 # --- Helper: Get band from job page ---
