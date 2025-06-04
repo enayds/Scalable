@@ -5,6 +5,8 @@ import pandas as pd
 import time
 import re
 from rapidfuzz import fuzz
+from datetime import datetime
+import re
 
 # ----------- UTILITY FUNCTIONS ------------
 
@@ -97,11 +99,11 @@ def main():
         location_filter = st.text_input("Location (optional)", "")
         contract_type = st.selectbox("Contract Type", ["Permanent", "Fixed Term", "Bank", "Any"], index=0)
         working_pattern = st.selectbox("Working Pattern", ["Full time", "Part time", "Both"], index=0)
-        min_band = st.slider("Minimum Band", 1, 9, 2)
-        max_band = st.slider("Maximum Band", 1, 9, 5)
+        min_band = st.number_input("Minimum Band", min_value=3, max_value = 9, value = 3)
+        max_band = st.number_input("Miximum Band", min_value=1, max_value = 9, value = 3)
         min_salary = st.number_input("Minimum Salary (£)", min_value=0, value=24000)
         sponsorship_filter = st.selectbox("Sponsorship", ["All", "Only with sponsorship", "Only without sponsorship"], index=0)
-        num_pages = st.number_input("Pages to Scrape", min_value=1, max_value=10, value=2)
+        num_pages = st.number_input("Pages to Scrape", min_value=1, max_value=50, value=1)
         run_search = st.button("🔎 Search Jobs")
 
     if not run_search:
@@ -144,6 +146,7 @@ def main():
 
                     salary_tag = job.select_one("li[data-test='search-result-salary']")
                     salary_text = salary_tag.get_text(strip=True) if salary_tag else ""
+                    salary_text = re.sub(r'\s+', ' ', salary_text)
                     salary_num = extract_numeric_salary(salary_text)
 
                     date_posted_tag = job.select_one("li[data-test='search-result-publicationDate']")
@@ -186,8 +189,8 @@ def main():
                         "Organisation": organisation,
                         "Location": location,
                         "Salary": salary_text.split(":")[-1],
-                        "Date Posted": date_posted.split(":")[-1],
-                        "Closing Date": closing_date.split(":")[-1],
+                        "Date Posted": datetime.strptime(date_posted.split(":")[-1].strip(), "%d %B %Y"),
+                        "Closing Date": datetime.strptime(closing_date.split(":")[-1].strip(), "%d %B %Y"),
                         "Contract Type": contract.split(":")[-1],
                         "Working Pattern": pattern.split(":")[-1],
                         "Band": band_text,
@@ -201,6 +204,8 @@ def main():
                     continue
 
     df = pd.DataFrame(results)
+    df = df[df["Date Posted"].notnull()].sort_values(by="Date Posted", ascending=False)
+
     st.success(f"✅ Found {len(df)} matching job(s).")
     st.dataframe(df)
 
