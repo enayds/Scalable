@@ -7,6 +7,9 @@ from datetime import datetime
 from fuzzywuzzy import fuzz
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
+import io
+import gdrive_uploader
+
 
 # --------- Utility Functions ---------
 def get_search_results_page(search_url, session):
@@ -89,9 +92,13 @@ def fetch_job_detail(full_link, session):
         sponsorship = detect_sponsorship(soup)
         license_required = detect_drivers_license(soup)
 
-        return band_num, sponsorship, license_required
+        ref_tag = soup.select_one("#trac-job-reference")
+        ref_number = ref_tag.get_text(strip=True) if ref_tag else None
+
+        return band_num, sponsorship, license_required, ref_number
     except:
-        return None, "Unknown", False
+        return None, "Unknown", False, None
+
 
 # --------- Main Scraper Logic ---------
 def scrape_jobs(base_url, filters_cleaned, num_pages):
@@ -176,7 +183,7 @@ def scrape_jobs(base_url, filters_cleaned, num_pages):
         for i, future in enumerate(as_completed(future_to_job)):
             job = future_to_job[future]
             try:
-                band, sponsorship, license_required = future.result()
+                band, sponsorship, license_required, ref_number = future.result()
 
                 if filters_cleaned.get("license_filter", False) and license_required:
                     continue
@@ -184,8 +191,10 @@ def scrape_jobs(base_url, filters_cleaned, num_pages):
                 job.update({
                     "Band": band,
                     "Sponsorship": sponsorship,
-                    "Driver's License Required": "Yes" if license_required else "No"
+                    "Driver's License Required": "Yes" if license_required else "No",
+                    "Reference Number": ref_number
                 })
+
 
                 results.append(job)
             except:
@@ -196,11 +205,12 @@ def scrape_jobs(base_url, filters_cleaned, num_pages):
 
 # --------- Main UI App ---------
 def main():
-    # st.set_page_config(page_title="NHS Job Filter", layout="wide")
     st.title("🔍 NHS Job Scraper with Smart Filters")
 
     with st.sidebar:
-        keyword = st.text_input("Job Keyword", value="Healthcare support worker")
+        keywords_input = st.text_input("Job Keywords (comma-separated)", value="Healthcare support worker")
+        keywords = [k.strip() for k in keywords_input.split(",") if k.strip()]
+
         contract_type = st.selectbox("Contract Type", ["Permanent", "Any"], index=0)
         working_pattern = st.selectbox("Working Pattern", ["Full time", "Any"], index=0)
 
@@ -220,50 +230,117 @@ def main():
             return
 
         min_salary = st.number_input("Minimum Salary (£)", min_value=0, value=24000)
-        num_pages = st.number_input("Pages to Scrape", min_value=1, max_value=50, value=1)
-        license_filter = st.checkbox("Must Not Require Driver's License")
+        num_pages = st.number_input("Pages to Scrape", min_value=1, max_value=500, value=1)
 
         location_filter = st.text_input("Location (optional)", "")
+        distance = None
+        if location_filter:
+            distance = st.selectbox("Distance from Location (miles)", [5, 10, 20, 30, 40, 50])
+
+        sponsorship_required = st.checkbox("Only show jobs that offer visa sponsorship")
+        license_filter = st.checkbox("Must Not Require Driver's License")
 
         run_search = st.button("🔎 Search Jobs")
 
     if not run_search:
         st.info("Set your filters in the sidebar and click **Search Jobs**.")
-        return
+    else:
+        band_range = bands[min_index:max_index + 1]
+        base_url = "https://www.jobs.nhs.uk/candidate/search/results?"
 
-    band_range = bands[min_index:max_index + 1]
+        filters = {
+            "location": location_filter,
+            "contractType": contract_type if contract_type != "Any" else "",
+            "workingPattern": "full-time" if working_pattern != "Any" else "",
+            "payBand": ",".join(band_range),
+            "language": "en",
+            "min_salary": min_salary,
+        }
 
-    filters = {
-        "keyword": keyword,
-        "location": location_filter,
-        "contractType": contract_type if contract_type != "Any" else "",
-        "workingPattern": "full-time" if working_pattern != "Any" else "",
-        "payBand": ",".join(band_range),
-        "language": "en",
-        "min_salary": min_salary,
-        "license_filter": license_filter
-    }
+        if distance:
+            filters["distance"] = distance
 
-    filters_cleaned = {k: v for k, v in filters.items() if v != "" and v is not None}
+        filters_cleaned = {k: v for k, v in filters.items() if v != "" and v is not None}
 
-    base_url = "https://www.jobs.nhs.uk/candidate/search/results?"
+        all_results = []
+        status_placeholder = st.empty()
 
-    final_url = base_url + urllib.parse.urlencode(filters_cleaned, quote_via=urllib.parse.quote)
-    soup = get_search_results_page(final_url, requests.Session())
+        for keyword in keywords:
+            status_placeholder.info(f"🔍 Searching and filtering jobs for keyword: **{keyword}**...")
+            filters_copy = filters_cleaned.copy()
+            filters_copy["keyword"] = keyword
 
-    total_pages = get_total_pages(soup)
-    pages_to_scrape = min(num_pages, total_pages)
-    results = scrape_jobs(base_url, filters_cleaned, pages_to_scrape)
+            final_url = base_url + urllib.parse.urlencode(filters_copy, quote_via=urllib.parse.quote)
+            soup = get_search_results_page(final_url, requests.Session())
 
-    df = pd.DataFrame(results)
-    df_sorted = df.sort_values(by='Date Posted', ascending=False).reset_index(drop=True)
+            total_pages = get_total_pages(soup)
+            pages_to_scrape = min(num_pages, total_pages)
 
-    st.subheader(f"Results ({len(df_sorted)} jobs found)")
-    st.dataframe(df_sorted.head(10))
+            keyword_results = scrape_jobs(base_url, filters_copy, pages_to_scrape)
 
-    df_sorted.to_csv("nhs_jobs_filtered.csv", index=False)
-    # st.download_button("📥 Download Results as CSV", df_sorted, "nhs_jobs.csv", "text/csv")
-    st.success("Saved to nhs_jobs_filtered.csv")
+            if sponsorship_required:
+                keyword_results = [job for job in keyword_results if job.get("Sponsorship") != "Not Offered"]
+
+            all_results.extend(keyword_results)
+
+        status_placeholder.empty()
+
+        if not all_results:
+            st.warning("No jobs found for the provided keyword(s) and filters.")
+            return
+
+        df = pd.DataFrame(all_results).drop_duplicates(subset=["Reference Number"])
+        df_sorted = df.sort_values(by='Date Posted', ascending=False).reset_index(drop=True)
+
+        st.session_state["df_sorted"] = df_sorted
+
+        st.subheader(f"Results ({len(df_sorted)} unique jobs found across {len(keywords)} keyword(s))")
+        st.dataframe(df_sorted.head(10))
+
+        df_sorted.to_csv("nhs_jobs_filtered.csv", index=False)
+
+        csv_buffer = io.StringIO()
+        df_sorted.to_csv(csv_buffer, index=False)
+        csv_data = csv_buffer.getvalue()
+
+        st.download_button(
+            label="📥 Download Results as CSV",
+            data=csv_data,
+            file_name="nhs_jobs_filtered.csv",
+            mime="text/csv"
+        )
+
+        st.success("Saved to nhs_jobs_filtered.csv")
+
+   
+
+
+    if "df_sorted" in st.session_state:
+         # Upload section – outside the scraping logic, always available if session data exists
+        st.markdown("---")
+        st.subheader("📤 Upload to Google Drive")
+        # Category selection (before upload)
+        category = st.selectbox("Select Job Category", [
+            "Admin",
+            "Healthcare",
+            "Business (PM, BA)",
+            "Finance",
+            "Tech"
+        ], index=None, placeholder="Choose a category")
+
+        if not category:
+            st.error("Please select a category before upload")
+        if st.button("📤 Upload"):
+            try:
+                import gdrive_uploader
+                message = gdrive_uploader.upload_to_drive(st.session_state["df_sorted"], category, prefix = "nhs")
+                st.success("✅ Upload completed successfully!")
+                st.caption(message)
+            except Exception as e:
+                st.error(f"❌ Upload failed: {str(e)}")
+    else:
+        st.info("Please run a job search before uploading to Google Drive.")
+
 
 if __name__ == "__main__":
     main()
