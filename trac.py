@@ -7,7 +7,10 @@ import pandas as pd
 import time
 from concurrent.futures import ThreadPoolExecutor
 import streamlit as st
+import gdrive_uploader 
 
+
+# -------------------- Trac Scraper Helpers --------------------
 
 def generate_trac_url(keyword, page=1):
     base_url = "https://www.healthjobsuk.com/job_list/ns"
@@ -76,7 +79,6 @@ def job_detail_passes_filters(job_url, contract_type, working_pattern, requires_
             "Requires Driver's License": "driver" in description or "licence" in description or "license" in description
         }
 
-        # Filter logic
         if contract_type and contract_type.lower() not in contract.lower():
             return False, info
         if working_pattern and working_pattern.lower() not in pattern.lower():
@@ -89,7 +91,6 @@ def job_detail_passes_filters(job_url, contract_type, working_pattern, requires_
         return True, info
     except requests.RequestException:
         return False, {"Requires Sponsorship": None, "Requires Driver's License": None}
-
 
 
 def process_single_job(job, keyword, min_salary, contract_type, working_pattern, min_band, max_band,
@@ -113,7 +114,6 @@ def process_single_job(job, keyword, min_salary, contract_type, working_pattern,
     if not filter_by_salary(salary, min_salary):
         return None
 
-    # Check detailed page and get metadata
     passed, info = job_detail_passes_filters(
         job_url, contract_type, working_pattern, requires_license, sponsorship_required
     )
@@ -130,7 +130,6 @@ def process_single_job(job, keyword, min_salary, contract_type, working_pattern,
         "Does Not Offer Sponsorship": info.get("Requires Sponsorship"),
         "Requires Driver's License": info.get("Requires Driver's License")
     }
-
 
 
 def scrape_trac_jobs(keyword, min_salary, contract_type, working_pattern, min_band, max_band,
@@ -164,60 +163,96 @@ def scrape_trac_jobs(keyword, min_salary, contract_type, working_pattern, min_ba
     return pd.DataFrame(all_results)
 
 
-# Streamlit UI
-def job_filter_sidebar():
-    st.sidebar.header("🔍 Job Search Filters")
+# -------------------- Streamlit UI --------------------
 
-    keyword = st.sidebar.text_input("Keyword", value="Healthcare support worker")
-    min_salary = st.sidebar.number_input("Minimum Salary (£)", min_value=0, value=20000)
+st.title("🧰 Trac Job Scraper (Multi-Keyword + Drive Upload)")
 
-    st.sidebar.markdown("#### Contract Details")
-    contract_type = st.sidebar.selectbox("Contract Type", ["", "Permanent", "Fixed Term", "Bank", "Secondment"])
-    working_pattern = st.sidebar.selectbox("Working Pattern", ["", "Full Time", "Part Time", "Flexible Working"])
+# Sidebar filters
+st.sidebar.header("🔍 Job Search Filters")
 
-    st.sidebar.markdown("#### NHS Band Range")
-    col1, col2 = st.sidebar.columns(2)
-    with col1:
-        min_band = st.number_input("Min Band", min_value=1, max_value=9, value=2, key="min_band")
-    with col2:
-        max_band = st.number_input("Max Band", min_value=1, max_value=9, value=4, key="max_band")
+keywords_input = st.sidebar.text_input("Job Keywords (comma-separated)", value="Healthcare support worker")
+keywords = [k.strip() for k in keywords_input.split(",") if k.strip()]
 
-    st.sidebar.markdown("#### Other Requirements")
-    requires_license = st.sidebar.checkbox("Does Not Require Driver's License", value=True)
-    sponsorship_required = st.sidebar.checkbox("Must Offer Sponsorship", value=True)
+min_salary = st.sidebar.number_input("Minimum Salary (£)", min_value=0, value=24000)
 
-    pages_to_scrape = st.sidebar.slider("Pages to Scrape", 1, 10, 3)
-    search = st.sidebar.button("Search Jobs 🔎")
+st.sidebar.markdown("#### Contract Details")
+contract_type = st.sidebar.selectbox("Contract Type", ["", "Permanent", "Fixed Term", "Bank", "Secondment"], index = 1)
+working_pattern = st.sidebar.selectbox("Working Pattern", ["", "Full Time", "Part Time", "Flexible Working"], index = 1)
 
-    return keyword, min_salary, contract_type, working_pattern, min_band, max_band, requires_license, sponsorship_required, pages_to_scrape, search
+st.sidebar.markdown("#### NHS Band Range")
+col1, col2 = st.sidebar.columns(2)
+with col1:
+    min_band = st.number_input("Min Band", min_value=1, max_value=9, value=3, key="min_band")
+with col2:
+    max_band = st.number_input("Max Band", min_value=1, max_value=9, value=5, key="max_band")
 
+st.sidebar.markdown("#### Other Requirements")
+requires_license = st.sidebar.checkbox("Does Not Require Driver's License", value=True)
+sponsorship_required = st.sidebar.checkbox("Must Offer Sponsorship", value=True)
 
-# 🎯 Main UI
-st.title("🧰 Trac Job Scraper (Optimized)")
+pages_to_scrape = st.sidebar.slider("Pages to Scrape", 1, 30, 3)
+run_search = st.sidebar.button("🔎 Search Jobs")
 
-(
-    keyword, min_salary, contract_type, working_pattern,
-    min_band, max_band, requires_license,
-    sponsorship_required, pages_to_scrape, search
-) = job_filter_sidebar()
+# Run scraping
+if run_search:
+    st.info("🔄 Starting search...")
 
-if search:
-    st.info("🔄 Scraping in progress... Please wait.")
-    df = scrape_trac_jobs(
-        keyword, min_salary, contract_type, working_pattern,
-        min_band, max_band, requires_license, sponsorship_required, pages_to_scrape
-    )
+    all_results = []
+    status = st.empty()
 
-    if df.empty:
-        st.warning("❌ No jobs found matching your filters.")
+    for keyword in keywords:
+        status.info(f"🔍 Scraping jobs for keyword: **{keyword}**...")
+        df_partial = scrape_trac_jobs(
+            keyword, min_salary, contract_type, working_pattern,
+            min_band, max_band, requires_license, sponsorship_required, pages_to_scrape
+        )
+
+        if not df_partial.empty:
+            all_results.append(df_partial)
+
+    status.empty()
+
+    if not all_results:
+        st.warning("❌ No jobs found across all keywords.")
     else:
-        st.success(f"✅ Found {len(df)} job(s) matching your filters.")
-        st.dataframe(df.head(20))
+        df_combined = pd.concat(all_results, ignore_index=True).drop_duplicates(subset=["URL"])
+        sort_column = "Min Salary" if "Min Salary" in df_combined.columns else df_combined.columns[0]
+        df_sorted = df_combined.sort_values(by=sort_column, ascending=False).reset_index(drop=True)
 
-        csv = df.to_csv(index=False)
+        st.session_state["df_trac"] = df_sorted
+
+        st.success(f"✅ Found {len(df_sorted)} unique jobs across {len(keywords)} keyword(s).")
+        st.dataframe(df_sorted.head(20))
+
         st.download_button(
             label="📥 Download results as CSV",
-            data=csv,
+            data=df_sorted.to_csv(index=False),
             file_name="trac_jobs.csv",
             mime="text/csv"
         )
+
+# -------------------- Upload to Google Drive --------------------
+
+if "df_trac" in st.session_state:
+    st.markdown("---")
+    st.subheader("📤 Upload to Google Drive")
+    st.markdown("#### Select Job Category for Upload")
+    category = st.selectbox("Job Category", [
+        "Admin",
+        "Healthcare",
+        "Business (PM, BA)",
+        "Finance",
+        "Tech"
+    ], index=None, placeholder="Choose a category")
+
+    if category and st.button("📤 Upload to Drive"):
+        try:
+            message = gdrive_uploader.upload_to_drive(st.session_state["df_trac"], category, prefix='trac')
+            st.success("✅ Upload completed successfully!")
+            st.caption(message)
+        except Exception as e:
+            st.error(f"❌ Upload failed: {str(e)}")
+    elif not category:
+        st.warning("⚠️ Please select a category before uploading.")
+else:
+    st.info("Please run a job search before uploading to Google Drive.")
